@@ -1,0 +1,23 @@
+[project]
+name = "m365search"
+version = "0.1.0"
+description = "Local, read-only full-text search over the OneDrive, Teams and Outlook data already synced to this Mac"
+requires-python = ">=3.11"
+dependencies = [
+    "ccl-chromium-reader",
+    "lz4>=4.4.5",
+    "mcp>=2.3",
+    "pyobjc-framework-eventkit>=12.2.2",
+    "pypdf>=5",
+]
+
+[project.scripts]
+m365search = "m365search.cli:main"
+m365search-mcp = "m365search.mcp_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+ccl-chromium-reader = { git = "https://github.com/cclgroupltd/ccl_chromium_reader.git" }
