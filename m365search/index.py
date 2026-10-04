@@ -47,8 +47,11 @@ def replace_source(con, source: str, docs: list[dict], notes: str = "") -> int:
         if source == "outlook" and not first:  # the first build with unique refs renames old mail: backfill it too
             prev = con.execute("SELECT notes FROM runs WHERE source = 'outlook'").fetchone()
             first = prev is not None and "preview_only=" not in (prev[0] or "")
-            # so does the first build that merges by local id: it re-dates mail without a Message-ID, adds ids
-            regrouped = not first and prev is not None and "body_by_id=" not in (prev[0] or "")
+            # so does the first build that merges by local id: it re-dates mail without a Message-ID, adds ids;
+            # and the first with meeting items, which were not indexed before and are not new, and which also
+            # takes a summary's sender from its From address, moving the user's own mail to the user
+            regrouped = not first and prev is not None and not all(
+                k in (prev[0] or "") for k in ("body_by_id=", "meetings="))
         when = "coalesce(d.ts, '')" if first else NOW
         if source == "outlook" and not first:  # a ref that gained, lost or changed its "#suffix" keeps its first_seen
             base = "substr(d.ref, 1, instr(d.ref || '#', '#') - 1)"

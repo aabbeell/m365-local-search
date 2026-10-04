@@ -133,11 +133,10 @@ def preview_report(since: str | None = None, limit: int = 20, cursor: str = "def
     from datetime import datetime
     docs, notes = outlook.collect()
     index.replace_source(index.connect(), "outlook", docs, notes)
-    docs = [d for d in docs if "has_body" in d]  # messages, not attachments
-    # body_ref: a copy of the same Message-ID holds the body, so there is nothing to open
+    docs = [d for d in docs if "has_body" in d and not d["meeting"]]  # messages, not attachments or meeting items
+    # to_open: no body here, in another copy of the same Message-ID or in a cached body object, and a sender
     todo, listed = [], set()
-    for d in sorted((d for d in docs if not d["has_body"] and not d["body_ref"]),
-                    key=lambda d: d["ts"] or "", reverse=True):
+    for d in sorted(filter(outlook.to_open, docs), key=lambda d: d["ts"] or "", reverse=True):
         if outlook.same_mail(d) not in listed:  # copies with the same sender, subject and preview: the newest
             listed.add(outlook.same_mail(d))
             todo.append(d)

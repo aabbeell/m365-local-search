@@ -6,7 +6,7 @@ Local, read-only full-text search over the Microsoft 365 data already synced to 
 |----------|---------------------------------------------------------------------------------|--------------|
 | OneDrive | `~/Library/CloudStorage/OneDrive-*` (incl. Teams/SharePoint libraries added as shortcuts) | Every file by name; text of docx, xlsx, pptx, pdf, eml, vtt, txt/md/csv for files on disk |
 | Teams    | New Teams IndexedDB cache in `~/Library/Containers/com.microsoft.teams2/...`    | Chat, group, meeting and channel messages still in the local cache (rolling, not full history) |
-| Outlook  | New Outlook `HxStore.hxd` in `~/Library/Group Containers/UBF8T346G9.Office/...` | Sender, subject, delivery time, recipients and the full body of almost every cached message; a ~255 character preview for the rest |
+| Outlook  | New Outlook `HxStore.hxd` in `~/Library/Group Containers/UBF8T346G9.Office/...`, plus the large bodies it keeps in `.../Main Identity/Files/S*/*/EFMData/` | Sender, subject, delivery time, recipients and the full body of almost every cached message; a ~255 character preview for the rest. Meeting requests, cancellations and replies as items of their own, with start, end and location |
 | Transcripts | Files downloaded from Teams (Recap > Transcript > Download) into `~/Documents/auchan-transcripts` (override with `M365SEARCH_TRANSCRIPTS`), plus the Teams cache | Full text of .vtt/.docx/.txt/.md transcripts, speaker per line; one `[transcript available]` marker per recorded meeting whose transcript sits in the organizer's OneDrive |
 | Outlook attachments | Attachments New Outlook downloaded to `.../Main Identity/Files/S*/*/Attachments/` | One `[attachment]` hit per distinct file, linked to its mail by original name, with the text of pdf, docx, xlsx and pptx files; copy out with `save` |
 
@@ -51,14 +51,18 @@ after it (mail or messages that reached the local caches late). Use one cursor p
 ## Outlook previews and full bodies
 
 New Outlook stores a message as a header object and a body object that share one local id, and almost
-every message whose header is cached here has its body too. What keeps only a ~255 character preview
-is mostly a conversation summary whose message is not cached, or a body Outlook keeps in a separate
-file; opening the mail in Outlook on this Mac should bring it in. Whether Outlook keeps the body of
-mail never opened there is not established. `previews` lists the messages that have only a preview,
+every message whose header is cached here has its body too. A body too large for its object sits whole
+in a gzip file under `Files/S*/*/EFMData/`, named by the body object, which keeps only its opening part;
+that file is read. What keeps only a ~255 character preview is mostly a conversation summary whose
+message is not cached; opening the mail in Outlook on this Mac should bring it in. Whether Outlook keeps
+the body of mail never opened there is not established. `previews` lists the messages that have only a preview,
 newest first: date, sender, subject, the start of the preview and a search string to paste
 into Outlook (`from:address "subject words"`). Options: `--since DATE`, `-n N`, `--cursor NAME`, `--json`.
 A copy of a mail whose preview sits in the body another copy of the same Message-ID holds is not listed,
-and copies with the same sender, subject and preview are listed once.
+copies with the same sender, subject and preview are listed once, and meeting items are not listed (a
+reply to a meeting request mostly has no body to fetch). Nor is a message whose body object is cached
+but empty or too short to keep (such as a mail with only an attachment): there is nothing more to
+fetch. A record without a sender stays searchable but is not listed, since nothing places it in Outlook.
 
 Each run starts by reporting how many messages listed by the previous run with the same cursor
 (default "default") have a full body now. Open a few in Outlook, run `previews` again, and that line
@@ -73,7 +77,12 @@ suffix still works with `show`, which lists the matching copies when there is mo
 older suffixed ref finds the copy left without one. The first build with unique refs renames some old
 mail; it counts as old for `changes last`, not as new, and so does a ref that later gains, loses or
 changes its suffix. The same holds for the first build that merges by local id, which re-dates mail
-without a Message-ID to its delivery minute and finds a few Message-IDs the old walk missed.
+without a Message-ID to its delivery minute and finds a few Message-IDs the old walk missed, and for the
+first build with meeting items, which were cached before but not indexed. That build also takes a
+summary's sender from its From address, which moves summaries of the user's own mail from a recipient
+to the user, and takes about twenty rows off the `previews` list (junk, copies of cached mail, mail
+whose cached body is empty); the first `previews` run after it reports most of them as no longer in
+the Outlook cache.
 
 ## Notes
 
@@ -91,10 +100,38 @@ without a Message-ID to its delivery minute and finds a few Message-IDs the old 
   instead of reading a neighbour's sender, subject or time. A body no header claims by id falls back
   to the header whose preview opens it, never to a header with a body object of its own. A body
   stored as several HTML parts (a reply's own text and the quoted mail) is read whole, each part up to
-  the NUL behind it, so the suggested replies and ids stored after it stay out. Sender, name and
-  subject are the values most copies agree on, and of a draft only the last saved revision. The time is
+  the NUL behind it, so the suggested replies and ids stored after it stay out. The time is
   the delivery time stored in the header object; elsewhere it is the earliest timestamp followed by
   a delivery stamp, not the plain minimum, which on this store sometimes picked stray older values.
   A conversation summary that repeats a cached message is folded into it. A reply's Message-ID is
   the one stored right after its In-Reply-To, not the parent's. Previews skip opaque values (`eyJ...`
-  tokens, ids), and every distinct preview of a message stays searchable.
+  tokens, ids), and every distinct preview of a message stays searchable. A body kept in an
+  `EFMData` file is read from it (gzip of the whole HTML) when its text holds the start of the part
+  in the store.
+- Outlook drafts: every header, body and summary object carries a change number that rises with
+  each save. Sender, name and subject are the values most copies of the last save agree on, the
+  preview and time those of the last save that has them; the delivery time is no order, a later save
+  of a draft can carry an earlier one. Next to a draft's text Outlook keeps a second body object
+  with only the quoted mail or nothing, which can carry the higher change number, so a doc shows the
+  body with the highest change number that holds the preview of the header's last save (else the
+  highest change number), not the longest.
+  Of a message's own saves only the last keeps its preview searchable.
+- Outlook junk: the ItemClass also sits in action backups and search caches (`~/ActionsBackup/...`:
+  search cards, people suggestions, image names); only header, body and summary objects count, one
+  record per object. A summary's sender is its From address, which comes first; the second address is
+  who Outlook's list shows, the recipient of the user's own mail, and the addresses behind a summary
+  belong to the next summaries, not to its recipients. The summary Outlook writes while the user
+  composes a message carries that message's own id and leftovers of earlier saves, and is skipped.
+  Display names (stored twice, or packed) are never taken as a preview, the line `Sent from Outlook
+  for Mac` never as a subject or name, and the subject of the user's own reply never as a name; in a
+  header object a subject stored once is the topic right behind its own copy, not the first run that looks like one. A
+  subject still being typed when a draft was first saved can stay as the topic; a longer subject
+  that extends it and is stored twice whole is the one the mail went out with.
+- Outlook meeting items: a meeting request, its cancellation and each accept, decline or tentative
+  reply is its own hit (ref, sender and delivery time as for mail), never merged into a mail. It is
+  stored like a message, with its own ItemClass, plus a time object and, for a request, a place object
+  under the same id; its text starts with plain lines such as `Meeting request`, `Start: 2026-01-15 10:00`,
+  `End: ...` (local time) and `Location: ...`, so they are searchable. For a recurring series the start
+  is the first occurrence. Conversation summaries of meeting items are skipped (each one repeats a cached
+  item), and so are calendar copies of an event without a header object. A report that a meeting request
+  was not delivered counts as mail.
