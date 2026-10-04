@@ -14,7 +14,9 @@ mcp = MCPServer("m365search", instructions=(
     "Read-only search over the Auchan Microsoft 365 data synced to this Mac: Outlook mail and attachments, "
     "Teams chats and meeting chats, Auchan OneDrive files, and Teams meeting transcripts. Use `search` for "
     "topics, `changes` for what is new in a date or time range, `show` for the full text of one hit. "
-    "Outlook is mostly ~255-character previews; Teams is a rolling cache, not full history. "
+    "Outlook has the full body of most cached mail and a ~255-character preview of the rest; Teams is a "
+    "rolling cache, not full history. `previews` lists the mail that has only a preview, so the user can open "
+    "those messages in Outlook on this Mac. "
     "`search` matches whole words; use `grep` for regex or partial strings (ticket numbers, codes, parts of "
     "names). Also search the files directly with your own grep/glob tools: OneDrive root "
     "~/Library/CloudStorage/OneDrive-AuchanMagyarországKft and transcripts ~/Documents/auchan-transcripts."
@@ -102,11 +104,22 @@ def grep(pattern: str, sources: list[str] | None = None, ignore_case: bool = Tru
 @mcp.tool()
 def show(ref: str) -> str:
     """Full text of one document, by the `ref` from a search or changes result."""
-    row = index.get(index.connect(), ref)
-    if not row:
+    rows = index.get(index.connect(), ref)
+    if not rows:
         return f"no document with ref {ref!r}"
-    source, ts, who, title, ref, body = row
-    return f"source: {source}\ndate: {ts or '-'}\nfrom: {who or '-'}\ntitle: {title}\nref: {ref}\n\n{body}"
+    return cli.show_text(ref, rows, pad=False)
+
+
+@mcp.tool()
+def previews(since: str | None = None, limit: int = 20, cursor: str = "default") -> str:
+    """Outlook mail that has only its ~255-character preview in the local cache, no full body, newest first.
+    Each item has an Outlook search string (`search`) the user can paste to find and open it in Outlook on
+    this Mac. `opened_since_last_check` lists messages from this cursor's previous check that have a full
+    body now; each call moves the cursor, so use a distinct cursor name per automated consumer. Also
+    refreshes the Outlook part of the index. since: 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM' local time."""
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        report = cli.preview_report(since, limit, cursor)
+    return json.dumps(report, ensure_ascii=False)
 
 
 @mcp.tool()

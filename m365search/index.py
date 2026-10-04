@@ -43,9 +43,21 @@ def replace_source(con, source: str, docs: list[dict], notes: str = "") -> int:
         )
         # the first build of a source backfills first_seen from the item's own time, not "now"
         first = con.execute("SELECT 1 FROM seen WHERE source = ? LIMIT 1", (source,)).fetchone() is None
-        con.execute(
-            f"INSERT OR IGNORE INTO seen SELECT ref, source, {"coalesce(ts, '')" if first else NOW} "
-            "FROM docs WHERE source = ?", (source,))
+        regrouped = False
+        if source == "outlook" and not first:  # the first build with unique refs renames old mail: backfill it too
+            prev = con.execute("SELECT notes FROM runs WHERE source = 'outlook'").fetchone()
+            first = prev is not None and "preview_only=" not in (prev[0] or "")
+            # so does the first build that merges by local id: it re-dates mail without a Message-ID, adds ids
+            regrouped = not first and prev is not None and "body_by_id=" not in (prev[0] or "")
+        when = "coalesce(d.ts, '')" if first else NOW
+        if source == "outlook" and not first:  # a ref that gained, lost or changed its "#suffix" keeps its first_seen
+            base = "substr(d.ref, 1, instr(d.ref || '#', '#') - 1)"
+            # base#anything as a range on the primary key ('$' follows '#'), so seen is searched, not scanned
+            when = (f"coalesce((SELECT min(s.first_seen) FROM seen s WHERE s.ref = {base} "
+                    f"OR (s.ref >= {base} || '#' AND s.ref < {base} || '$')), "
+                    + ("d.ts, '')" if regrouped else f"{NOW})"))
+        con.execute(f"INSERT OR IGNORE INTO seen SELECT d.ref, d.source, {when} FROM docs d WHERE d.source = ?",
+                    (source,))
         con.execute(
             "INSERT OR REPLACE INTO runs VALUES (?, datetime('now', 'localtime'), ?, ?, unixepoch('subsec'))",
             (source, len(docs), notes),
@@ -79,8 +91,17 @@ def built_epoch(con, source: str) -> float:
     return row[0] or 0.0 if row else 0.0
 
 
-def get(con, ref: str):
-    return con.execute("SELECT source, ts, who, title, ref, body FROM docs WHERE ref = ?", (ref,)).fetchone()
+def get(con, ref: str) -> list[tuple]:
+    """Every document with this ref. An Outlook ref from before refs were made unique (no "#suffix")
+    returns all the copies that now carry it with a suffix; a suffixed ref whose other copies left the
+    cache finds the one left without it."""
+    cols = "SELECT source, ts, who, title, ref, body FROM docs"
+    rows = (con.execute(f"{cols} WHERE ref = ? ORDER BY ts DESC", (ref,)).fetchall()
+            or con.execute(f"{cols} WHERE substr(ref, 1, length(?) + 1) = ? || '#' ORDER BY ts DESC",
+                           (ref, ref)).fetchall())
+    if not rows and ref.startswith("outlook:") and "#" in ref:
+        rows = con.execute(f"{cols} WHERE ref = ? ORDER BY ts DESC", (ref.rpartition("#")[0],)).fetchall()
+    return rows
 
 
 def _bound(s: str, end: bool = False) -> str:
