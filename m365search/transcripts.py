@@ -216,10 +216,35 @@ def _plain(x):
     return x
 
 
+def _archive(docs: list[dict]) -> tuple[list[dict], int]:
+    """Teams evicts recaps and Loop pages from its cache, so keep a local copy of each one ever seen
+    (next to the index, never on a shared drive) and bring back the ones the cache no longer has."""
+    import hashlib
+    import json
+    from .index import INDEX_PATH
+    folder = INDEX_PATH.parent / "meetings"
+    folder.mkdir(parents=True, exist_ok=True)
+    live = {d["ref"] for d in docs}
+    for d in docs:
+        if d["ref"].startswith(("recap:", "loop:")):
+            name = hashlib.sha1(d["ref"].encode()).hexdigest()[:16] + ".json"
+            (folder / name).write_text(json.dumps(d, ensure_ascii=False), "utf-8")
+    kept = []
+    for f in folder.glob("*.json"):
+        try:
+            d = json.loads(f.read_text("utf-8"))
+        except ValueError:
+            continue
+        if d.get("ref") not in live:
+            kept.append(d)
+    return kept, len(kept)
+
+
 def collect() -> tuple[list[dict], str]:
     files, s1 = _files()
-    markers, s2 = _teams_meetings()
-    return files + markers, ", ".join(f"{k}={v}" for k, v in {**s1, **s2}.items())
+    meetings, s2 = _teams_meetings()
+    kept, s2["archived"] = _archive(meetings)
+    return files + meetings + kept, ", ".join(f"{k}={v}" for k, v in {**s1, **s2}.items())
 
 
 def last_change() -> float:
