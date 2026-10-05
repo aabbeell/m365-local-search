@@ -12,7 +12,9 @@ from . import cli, index
 
 mcp = MCPServer("m365search", instructions=(
     "Read-only search over the Auchan Microsoft 365 data synced to this Mac: Outlook mail and attachments, "
-    "Teams chats and meeting chats, Auchan OneDrive files, and Teams meeting transcripts. Use `search` for "
+    "Teams chats and meeting chats, Auchan OneDrive files, and Teams meetings: `[meeting recap]` (AI notes, Copilot "
+    "summary, action items), `[meeting notes]` (the Loop meeting-notes page: decisions, open questions, notes) and "
+    "downloaded transcripts, all in the `transcripts` source. Use `search` for "
     "topics, `changes` for what is new in a date or time range, `show` for the full text of one hit. "
     "Outlook has the full body of most cached mail and a ~255-character preview of the rest; Teams is a "
     "rolling cache, not full history. Outlook meeting requests, cancellations and replies are hits of their "
