@@ -11,19 +11,24 @@ from mcp.server.mcpserver import MCPServer
 from . import cli, index
 
 mcp = MCPServer("m365search", instructions=(
-    "Read-only search over the Auchan Microsoft 365 data synced to this Mac: Outlook mail and attachments, "
-    "Teams chats and meeting chats, Auchan OneDrive files, and Teams meetings: `[meeting recap]` (AI notes, Copilot "
-    "summary, action items), `[meeting notes]` (the Loop meeting-notes page: decisions, open questions, notes) and "
-    "downloaded transcripts, all in the `transcripts` source. Use `search` for "
-    "topics, `changes` for what is new in a date or time range, `show` for the full text of one hit. "
-    "Outlook has the full body of most cached mail and a ~255-character preview of the rest; Teams is a "
-    "rolling cache, not full history. Outlook meeting requests, cancellations and replies are hits of their "
-    "own, whose text starts with lines such as `Meeting request`, `Start:`, `End:` and `Location:`. "
-    "`previews` lists the mail that has only a preview, so the user can open those messages in Outlook on "
-    "this Mac. "
-    "`search` matches whole words; use `grep` for regex or partial strings (ticket numbers, codes, parts of "
-    "names). Also search the files directly with your own grep/glob tools: OneDrive root "
-    "~/Library/CloudStorage/OneDrive-AuchanMagyarországKft and transcripts ~/Documents/auchan-transcripts."
+    "Read-only search over the Auchan Microsoft 365 data synced to this Mac, i.e. what the user exchanged "
+    "with Auchan people: `outlook` (mail, attachments, meeting requests), `teams` (chats and meeting chats; a "
+    "rolling cache, not full history), `onedrive` (files on the Auchan OneDrive and the SharePoint/Teams "
+    "libraries synced with it) and `transcripts` (Teams meetings: `[meeting recap]` Copilot notes and action "
+    "items, `[meeting notes]` Loop page, downloaded transcripts). "
+    "Not here, look elsewhere: BPDATA's own project material (memos, status, decisions, use-case registers, "
+    "drafts) is in the Auchan dossier on the Google Shared Drive (AI-Shadowing/03_Enterprise_Clients/Auchan/, "
+    "its CLAUDE.md has a 'Mit hova' table); the knowledge hub is Auchan/knowledge_hub/ there; BigQuery tables "
+    "and data, GCP projects, service accounts, terraform and GitLab code are in BigQuery (`bq`) and the repos; "
+    "general product or how-to questions go to the web. If the user says to work from the memos, the dossier "
+    "or GCP, do not search here. "
+    "Use `search` for topics (whole words, accent-insensitive), `grep` for regex or partial strings (ticket "
+    "numbers, codes, parts of names), `show` for the full text of one hit. For what is new, use `changes` (a "
+    "date range, or since the previous call) instead of re-searching known topics one by one. Never `grep '.'` "
+    "or another match-all pattern: it returns the whole cache; narrow by person, chat name or words. "
+    "Outlook has the full body of most mail and only a ~255-character preview of the rest; `previews` lists "
+    "those so the user can open them in Outlook. The files are also on disk for your own grep/glob: OneDrive "
+    "~/Library/CloudStorage/OneDrive-AuchanMagyarországKft, transcripts ~/Documents/auchan-transcripts."
 ))
 
 SOURCES = list(cli.SOURCES)
@@ -47,7 +52,8 @@ def _check(sources):
 def search(query: str, sources: list[str] | None = None, limit: int = 20) -> str:
     """Full-text search. Plain words are ANDed and accent-insensitive; FTS5 syntax ("exact phrase", OR,
     NEAR, prefix*) passes through. sources: any of onedrive, teams, outlook, transcripts (default all).
-    Returns hits with a `ref` to pass to `show`."""
+    Outlook meeting requests, cancellations and replies are hits of their own, whose text starts with lines
+    such as `Meeting request`, `Start:`, `End:` and `Location:`. Returns hits with a `ref` to pass to `show`."""
     _check(sources)
     counts, rows = index.search(_con(sources), query, sources, limit)
     return json.dumps(dict(query=query, counts=counts, hits=[
@@ -82,7 +88,8 @@ def changes(since: str | None = None, until: str | None = None, sources: list[st
 def grep(pattern: str, sources: list[str] | None = None, ignore_case: bool = True, limit: int = 50) -> str:
     """Regular-expression search over the full indexed text (title, sender, body) of every source, including
     Teams and Outlook, which are not files on disk. Use for partial strings, codes, numbers, or patterns
-    `search` cannot express. Returns hits with the matching line and a `ref` for `show`."""
+    `search` cannot express. Do not use a match-all pattern such as '.' to list chats or browse a source: it
+    returns the whole cache. Returns hits with the matching line and a `ref` for `show`."""
     import re
     _check(sources)
     rx = re.compile(pattern, re.I if ignore_case else 0)
