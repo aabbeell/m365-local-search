@@ -115,11 +115,17 @@ OBJECT = re.compile(rb"\x05\x00(.{2})(.{4})\x00\x00", re.S)
 OBJ_TAIL = 15
 HEADER_OBJ = 0x060F  # MessageHeader: sender, subject, preview, Message-ID; its id is the message's local id
 BODY_OBJ = 0x0740    # MessageData: the ItemClass, then the HTML body; same id as its header object
+# Outlook 16.114 (first seen 2026-11-02) writes the same MessageData object under type 0x074E
+BODY_TYPES = (BODY_OBJ, 0x074E)
 CONV_OBJ = 0x0430    # conversation summary: latest sender and preview, no body, no id of one message
 RECEIVED_AT = 293    # .NET ticks of the delivery time (ReceivedTime) in a header object
 CN_AT = 117          # u64 change number in a header, body or summary object: every save of an item raises it
 TIME_OBJ = 0x014E    # a meeting item's times, same id as its header object: UTC ticks of the end, then the start
 END_AT, START_AT = 133, 157
+# a mail folder: its display name is the object's first text run; every header object holds the id of the folder
+# its message is in (Inbox, Sent Items, Drafts, ...) as a u64 at FOLDER_AT, and a draft that is sent moves to Sent
+FOLDER_OBJ = 0x04D8
+FOLDER_AT = 913
 PLACE_OBJ = 0x015E   # a meeting request's organizer name, address and location, same id; the type also holds contacts
 # a body too large for its object is kept whole in a gzip file the object names, ~ being the profile folder;
 # the object then holds only its opening part, or nothing
@@ -188,7 +194,7 @@ def _objects(block: bytes) -> list[tuple[int, int, int, int]]:
 def _owner(objects: list[tuple[int, int, int, int]], anchor: int) -> tuple[int, int, int, int] | None:
     """The header, body or conversation object an anchor sits in; None for other or unparsed objects."""
     k = bisect.bisect_left(objects, (anchor,)) - 1
-    if k >= 0 and objects[k][0] < anchor < objects[k][1] and objects[k][2] in (HEADER_OBJ, BODY_OBJ, CONV_OBJ):
+    if k >= 0 and objects[k][0] < anchor < objects[k][1] and objects[k][2] in (HEADER_OBJ, CONV_OBJ, *BODY_TYPES):
         return objects[k]
     return None
 
@@ -374,13 +380,13 @@ def _kind(block: bytes, anchor: int, owner: tuple | None = None, alen: int = len
     other: anything else, mostly conversation summaries, whose sender, preview and subject precede the anchor
     """
     nxt = block[anchor + alen + 2:anchor + alen + 18]
-    if (owner[2] == BODY_OBJ) if owner else nxt.startswith(HTML_START):
+    if (owner[2] in BODY_TYPES) if owner else nxt.startswith(HTML_START):
         return "body"
     return "mid" if nxt[:2] == b"<\x00" else "other"
 
 
 def _record(block: bytes, runs: list[tuple[int, str]], anchor: int, prev_end: int, end: int, kind: str,
-            owner: tuple | None = None, item_class: str = "IPM.Note") -> dict:
+            owner: tuple | None = None, item_class: str = "IPM.Note", other_mail: list | None = None) -> dict:
     back = min(SENDER_MAX_DIST, anchor - prev_end)
     alen = 2 * len(item_class)
     rec = dict(sender=None, name=None, subject=None, preview=None, message_id=None, recipients=[], conv_ids=[],
@@ -392,7 +398,7 @@ def _record(block: bytes, runs: list[tuple[int, str]], anchor: int, prev_end: in
                                  if lo <= pos < end and pos != anchor and ATTACHMENT_NAME.match(t.strip())})
     if owner and owner[0] + CN_AT + 8 <= owner[1]:
         rec["cn"] = struct.unpack_from("<Q", block, owner[0] + CN_AT)[0]  # orders the saved revisions of one item
-    if owner and owner[2] in (HEADER_OBJ, BODY_OBJ):
+    if owner and owner[2] in (HEADER_OBJ, *BODY_TYPES):
         rec["oid"] = owner[3]  # the local id a body object and its header object share
     elif owner:
         rec["summary_id"] = owner[3]  # _raw_records drops a summary with a message's own id
@@ -434,6 +440,8 @@ def _record(block: bytes, runs: list[tuple[int, str]], anchor: int, prev_end: in
     if owner and owner[2] == CONV_OBJ:  # a summary holds the From address first, then the one its list shows,
         first = next((_undouble(t.strip()).lower() for _, t in before if _is_email(t.strip())), None)
         if first and first != rec["sender"]:  # which for the user's own mail is the recipient, with its name
+            if rec["sender"]:
+                rec["recipients"].append(rec["sender"])
             rec["sender"], rec["name"] = first, None
 
     ids = []  # (rel, end_rel, id) of the <...@...> runs
@@ -446,7 +454,8 @@ def _record(block: bytes, runs: list[tuple[int, str]], anchor: int, prev_end: in
         if anchor < pos < wide_end and _is_email(t):
             a = _undouble(t).lower()  # an address stored twice, or behind the item class of a summary's list
             a = next((a[len(c):] for c in CLASS_PREFIXES if a.startswith(c) and _is_email(a[len(c):])), a)
-            if a != rec["sender"]:
+            # an address inside another item's header, body or summary object is that item's sender or recipient
+            if a != rec["sender"] and not any(s <= pos < e for s, e in other_mail or ()):
                 rec["recipients"].append(a)
     # a reply stores In-Reply-To first and its own Message-ID right behind it; a new message only its own.
     # Only the mid layout starts with an id; elsewhere the first id may be a neighbour's.
@@ -635,24 +644,26 @@ def _meeting_info(times: tuple[int, int] | None, place: bytes | None) -> dict:
 def _raw_records(stats: Counter) -> tuple[list[dict], set[tuple[str, int]], dict]:
     """The record of every header, body and summary object with an ItemClass anchor, the (store, id) of every body
     object, also one without an inline body, and the times and place of every meeting item by (store, id)."""
-    raw, body_ids, times, places, files = [], set(), {}, {}, {}
+    raw, body_ids, times, places, files, folders = [], set(), {}, {}, {}, {}
     for store in stores():
         snapshot = store.read_bytes()  # Outlook keeps writing; parse a consistent copy in memory
         for bno, block in enumerate(_blocks(snapshot, stats)):
             objects = _objects(block)
             for s, e, typ, oid in objects:
-                if typ == BODY_OBJ:
+                if typ in BODY_TYPES:
                     body_ids.add((str(store), oid))
                 elif typ == TIME_OBJ and s + START_AT + 8 <= e:
                     times[(str(store), oid)] = (struct.unpack_from("<Q", block, s + START_AT)[0],
                                                 struct.unpack_from("<Q", block, s + END_AT)[0])
                 elif typ == PLACE_OBJ:  # parsed only for meeting items: most of these objects are contacts
                     places[(str(store), oid)] = block[s:e]
+                elif typ == FOLDER_OBJ and (name := _runs(block[s:e])):
+                    folders[(str(store), oid)] = name[0][1]
             # a meeting item counts only in its header or body object, so it always has its id: its conversation
             # summaries all repeat a cached item here, with the names of its attendees run together for a preview
             anchors = [(m.start(), m.group().decode("utf-16-le")) for m in ANCHORS.finditer(block)]
             anchors = [(a, c) for a, c in anchors
-                       if c == "IPM.Note" or (o := _owner(objects, a)) and o[2] in (HEADER_OBJ, BODY_OBJ)]
+                       if c == "IPM.Note" or (o := _owner(objects, a)) and o[2] in (HEADER_OBJ, *BODY_TYPES)]
             if not anchors:
                 continue
             runs = _runs(block)
@@ -668,9 +679,14 @@ def _raw_records(stats: Counter) -> tuple[list[dict], set[tuple[str, int]], dict
                     stats["anchors_not_mail" if owner is None else "anchors_repeated"] += 1
                     continue
                 done.add(owner)
+                # the header, body and summary objects of other items behind this one hold no recipient of it
+                other_mail = [(s, e) for s, e, typ, oid in objects
+                              if s >= owner[1] and typ in (HEADER_OBJ, CONV_OBJ, *BODY_TYPES) and oid != owner[3]]
                 r = _record(block, runs, a, prev_end, end, _kind(block, a, owner, 2 * len(item_class)), owner,
-                            item_class)
+                            item_class, other_mail)
                 r["blk"] = (str(store), bno)
+                r["folder_id"] = (struct.unpack_from("<Q", block, owner[0] + FOLDER_AT)[0]
+                                  if owner[2] == HEADER_OBJ and owner[0] + FOLDER_AT + 8 <= owner[1] else None)
                 r["link"] = (str(store), r["oid"]) if r["oid"] is not None else None
                 if r["body_file"]:  # the whole body; what the object holds is its opening part, or nothing
                     text = _body_file(store, r["body_file"], files, stats)
@@ -687,6 +703,8 @@ def _raw_records(stats: Counter) -> tuple[list[dict], set[tuple[str, int]], dict
     kept =[r for r in raw if not (r["summary_id"] is not None and (r["blk"][0], r["summary_id"]) in own)]
     stats["summaries_of_drafts"] += len(raw) - len(kept)
     raw = kept
+    for r in raw:
+        r["folder"] = folders.get((r["blk"][0], r["folder_id"])) if r["folder_id"] is not None else None
     meetings = {k: _meeting_info(times.get(k), places.get(k))
                 for k in {r["link"] for r in raw if r["meeting"] and r["link"]}}
     return raw, body_ids, meetings
@@ -764,6 +782,8 @@ def _fold(t: dict, m: dict) -> None:
     t["recipients"] |= m["recipients"]
     t["conv_ids"] |= m["conv_ids"]
     t["attachments"] |= m["attachments"]
+    if m["folder"][0] > t["folder"][0]:
+        t["folder"] = m["folder"]
 
 
 def _pick_body(m: dict) -> None:
@@ -851,7 +871,7 @@ def collect() -> tuple[list[dict], str]:
         else:
             key = ("id", r["message_id"] or (r["preview"] or "")[:80])
         m = merged.setdefault(key, dict(recipients=set(), conv_ids=set(), attachments=set(), previews=[], bodies=[],
-                                        ids=Counter(), votes={f: {} for f in VOTED}, latest=0))
+                                        ids=Counter(), votes={f: {} for f in VOTED}, latest=0, folder=(-1, None)))
         m["meeting"] = m.get("meeting") or r["meeting"]
         m["attachments"].update(r["attachments"])
         # a draft is saved many times, each save under a higher change number, and only the copies of the last
@@ -861,6 +881,8 @@ def collect() -> tuple[list[dict], str]:
         for f, votes in m["votes"].items():
             if r[f]:
                 votes.setdefault(r["cn"], Counter())[r[f]] += 1
+        if r["folder"] and r["cn"] >= m["folder"][0]:  # a draft that is sent moves to Sent Items in a later save
+            m["folder"] = (r["cn"], r["folder"])
         if r["message_id"]:
             m["ids"][r["message_id"]] += 1
         if r["preview"]:
@@ -943,13 +965,16 @@ def collect() -> tuple[list[dict], str]:
                 seen += " " + _norm_text(p)
         if m["recipients"]:
             body_parts.append("To: " + ", ".join(sorted(m["recipients"])))
+        if m["folder"][1]:
+            body_parts.append("Folder: " + m["folder"][1])
         if m["attachments"]:
             body_parts.append("Attachments: " + "; ".join(sorted(m["attachments"])))
         docs.append(dict(ref=f"outlook:{m.get('message_id') or _ref_key(key, m)}", ts=m.get("ts") or info.get("start"),
                          who=who, title=m.get("subject") or "(no subject recovered)", body="\n".join(body_parts),
                          sender=m.get("sender"), name=m.get("name"), subject=m.get("subject"),
                          preview=m.get("preview"), has_body=bool(m.get("body")), body_ref=None, uid=_uid(m),
-                         meeting=m["meeting"], body_cached=key[0] == "oid" and key[1:] in body_ids))
+                         meeting=m["meeting"], body_cached=key[0] == "oid" and key[1:] in body_ids,
+                         folder=m["folder"][1]))
         m["doc"] = docs[-1]
     _unique_refs(docs)
 
@@ -977,6 +1002,8 @@ def collect() -> tuple[list[dict], str]:
     stats["with_sender"] = sum(1 for m in mails if m.get("sender"))
     stats["with_time"] = sum(1 for m in mails if m.get("ts"))
     stats["with_full_body"] = sum(1 for m in mails if m.get("body"))
+    stats["in_drafts"] = sum(1 for m in mails if m["folder"][1] == "Drafts")
+    stats["with_folder"] = sum(1 for m in mails if m["folder"][1])
     stats["preview_copies"] = sum(1 for d in docs if d.get("body_ref"))
     stats["preview_only"] = len({same_mail(d) for d in docs if to_open(d)})
     return docs, ", ".join(f"{k}={v}" for k, v in sorted(stats.items()))
